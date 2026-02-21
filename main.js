@@ -90,7 +90,7 @@ router.get("/test", async (ctx) => {
       }
     }
     
-    const result = await executeFunction(func.id, func.user_id, func.code, parsedInput);
+    const result = await executeFunction(func.id, func.user_id, func.code, parsedInput, func.language || 'javascript');
     
     // Get origin for CORS
     const origin = ctx.request.headers.get("origin") || "*";
@@ -137,7 +137,7 @@ router.get("/test", async (ctx) => {
 // Deploy function
 router.post("/deploy", requireAuth, async (ctx) => {
   const body = ctx.request.body;
-  const { name, code } = await body.json();
+  const { name, code, language } = await body.json();
   const user = ctx.state.user;
 
   const nameVal = validateFunctionName(name);
@@ -154,13 +154,18 @@ router.post("/deploy", requireAuth, async (ctx) => {
     return;
   }
 
-  const func = await createFunction(user.id, name, code);
+  // Validate language
+  const validLanguages = ['javascript', 'typescript'];
+  const lang = language && validLanguages.includes(language) ? language : 'javascript';
+
+  const func = await createFunction(user.id, name, code, lang);
   await initializeQuota(user.id);
 
   ctx.response.status = 201;
   ctx.response.body = formatSuccess({
     id: func.id,
     name: func.name,
+    language: func.language,
     createdAt: func.created_at,
   });
 });
@@ -200,9 +205,9 @@ router.get("/functions/:id", requireAuth, async (ctx) => {
 router.put("/functions/:id/code", requireAuth, async (ctx) => {
   const { id } = ctx.params;
   const user = ctx.state.user;
-  const { code } = await ctx.request.body.json();
+  const { code, language } = await ctx.request.body.json();
 
-  const updated = await updateFunctionCode(id, user.id, code);
+  const updated = await updateFunctionCode(id, user.id, code, language);
   ctx.response.body = formatSuccess(updated);
 });
 
@@ -252,7 +257,7 @@ router.get("/run/:id", async (ctx) => {
     }
   }
 
-  const result = await executeFunction(id, func.user_id, func.code, parsedInput);
+  const result = await executeFunction(id, func.user_id, func.code, parsedInput, func.language || 'javascript');
   
   // Get origin for CORS
   const origin = ctx.request.headers.get("origin") || "*";
