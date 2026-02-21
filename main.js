@@ -8,6 +8,7 @@ import {
   createFunction,
   getFunction,
   getFunctionById,
+  getFunctionByName,
   listFunctions,
   updateFunctionCode,
   updateFunctionStatus,
@@ -62,6 +63,75 @@ router.get("/health", (ctx) => {
     instances: getInstanceCount(),
     maxInstances: getMaxInstances(),
   });
+});
+
+// Test endpoint - executes hello-world function
+router.get("/test", async (ctx) => {
+  try {
+    // Find hello-world function
+    const func = await getFunctionByName("hello-world");
+    
+    if (!func) {
+      ctx.response.status = 404;
+      ctx.response.body = formatError("Test function not found. Server may still be initializing.");
+      return;
+    }
+    
+    // Parse input from query parameters
+    const input = ctx.request.url.searchParams.get("input");
+    let parsedInput = null;
+    if (input) {
+      try {
+        parsedInput = JSON.parse(input);
+      } catch {
+        ctx.response.status = 400;
+        ctx.response.body = formatError("Invalid JSON in input parameter");
+        return;
+      }
+    }
+    
+    const result = await executeFunction(func.id, func.user_id, func.code, parsedInput);
+    
+    // Get origin for CORS
+    const origin = ctx.request.headers.get("origin") || "*";
+    
+    // Parse and return HTTP response
+    if (result.status === 'success' && result.output) {
+      try {
+        const httpResponse = JSON.parse(result.output);
+        if (httpResponse && typeof httpResponse.status === 'number') {
+          ctx.response.status = httpResponse.status;
+          ctx.response.headers.set('Access-Control-Allow-Origin', origin);
+          ctx.response.headers.set('Access-Control-Allow-Credentials', 'true');
+          
+          if (httpResponse.headers && typeof httpResponse.headers === 'object') {
+            Object.entries(httpResponse.headers).forEach(([key, value]) => {
+              ctx.response.headers.set(key, String(value));
+            });
+          }
+          
+          let body = httpResponse.body;
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body);
+            } catch {}
+          }
+          ctx.response.body = body;
+          return;
+        }
+      } catch {}
+    }
+    
+    ctx.response.headers.set('Access-Control-Allow-Origin', origin);
+    ctx.response.headers.set('Access-Control-Allow-Credentials', 'true');
+    ctx.response.body = formatSuccess({
+      ...result,
+      output: sanitizeOutput(result.output)
+    });
+  } catch (error) {
+    ctx.response.status = 500;
+    ctx.response.body = formatError(error.message);
+  }
 });
 
 // Deploy function
@@ -183,6 +253,51 @@ router.get("/run/:id", async (ctx) => {
   }
 
   const result = await executeFunction(id, func.user_id, func.code, parsedInput);
+  
+  // Get origin for CORS
+  const origin = ctx.request.headers.get("origin") || "*";
+  
+  // Parse the response if it's a valid HTTP response object
+  if (result.status === 'success' && result.output) {
+    try {
+      const httpResponse = JSON.parse(result.output);
+      if (httpResponse && typeof httpResponse.status === 'number') {
+        // Valid HTTP response format
+        ctx.response.status = httpResponse.status;
+        
+        // Add CORS headers
+        ctx.response.headers.set('Access-Control-Allow-Origin', origin);
+        ctx.response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        ctx.response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        ctx.response.headers.set('Access-Control-Allow-Credentials', 'true');
+        
+        // Set custom headers from function
+        if (httpResponse.headers && typeof httpResponse.headers === 'object') {
+          Object.entries(httpResponse.headers).forEach(([key, value]) => {
+            ctx.response.headers.set(key, String(value));
+          });
+        }
+        
+        // Set body - try to parse as JSON if it's a string
+        let body = httpResponse.body;
+        if (typeof body === 'string') {
+          try {
+            body = JSON.parse(body);
+          } catch {
+            // Keep as string if not valid JSON
+          }
+        }
+        ctx.response.body = body;
+        return;
+      }
+    } catch {
+      // Not a valid HTTP response, fall through to default handling
+    }
+  }
+  
+  // Default response format with CORS
+  ctx.response.headers.set('Access-Control-Allow-Origin', origin);
+  ctx.response.headers.set('Access-Control-Allow-Credentials', 'true');
   ctx.response.body = formatSuccess({
     ...result,
     output: sanitizeOutput(result.output)
