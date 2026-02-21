@@ -162,6 +162,18 @@ export async function getFunction(functionId, userId) {
   }
 }
 
+export async function getFunctionById(functionId) {
+  const connection = await pool.connect();
+  try {
+    const result = await connection.queryObject`
+      SELECT * FROM functions WHERE id = ${functionId}
+    `;
+    return result.rows[0];
+  } finally {
+    connection.release();
+  }
+}
+
 export async function listFunctions(userId) {
   const connection = await pool.connect();
   try {
