@@ -201,6 +201,20 @@ export async function updateFunctionCode(functionId, userId, code) {
   }
 }
 
+export async function updateFunctionStatus(functionId, userId, enabled) {
+  const connection = await pool.connect();
+  try {
+    const result = await connection.queryObject`
+      UPDATE functions SET enabled = ${enabled}, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${functionId} AND user_id = ${userId}
+      RETURNING *
+    `;
+    return result.rows[0];
+  } finally {
+    connection.release();
+  }
+}
+
 export async function deleteFunction(functionId, userId) {
   const connection = await pool.connect();
   try {
