@@ -1,8 +1,11 @@
 // database.js - PostgreSQL connection and schema management
-import { Pool } from "postgres";
+import { Pool } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
 let pool;
 
+/**
+ * Initializes the database connection pool and sets up the schema.
+ */
 export async function initDatabase() {
   try {
     const connectionString = Deno.env.get("DATABASE_URL");
@@ -11,7 +14,9 @@ export async function initDatabase() {
       throw new Error("DATABASE_URL environment variable is required");
     }
 
-    pool = new Pool(connectionString, 1);
+    // Using 1 connection for the pool to conserve RAM on 4GB laptop
+    // Lazy-loading (true) ensures we don't hog memory until needed
+    pool = new Pool(connectionString, 1, true);
 
     const connection = await pool.connect();
     console.log("[Novirun] Connected to PostgreSQL database");
@@ -25,23 +30,16 @@ export async function initDatabase() {
   }
 }
 
+/**
+ * Creates tables and indexes if they do not exist.
+ * Does NOT drop tables to ensure data persistence.
+ */
 async function createSchema() {
   const connection = await pool.connect();
   try {
-    // Drop tables in reverse order if they exist (to avoid FK constraint issues)
-    // This is safe because we're using CREATE TABLE IF NOT EXISTS
-    try {
-      await connection.queryObject`DROP TABLE IF EXISTS quotas CASCADE`;
-      await connection.queryObject`DROP TABLE IF EXISTS executions CASCADE`;
-      await connection.queryObject`DROP TABLE IF EXISTS functions CASCADE`;
-      await connection.queryObject`DROP TABLE IF EXISTS users CASCADE`;
-    } catch (dropError) {
-      // Ignore drop errors - tables might not exist
-    }
-
-    // Create users table first (no dependencies)
+    // 1. Users table
     await connection.queryObject`
-      CREATE TABLE users (
+      CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         appwrite_user_id TEXT UNIQUE NOT NULL,
         email TEXT NOT NULL,
@@ -50,9 +48,9 @@ async function createSchema() {
       )
     `;
 
-    // Create functions table (depends on users)
+    // 2. Functions table
     await connection.queryObject`
-      CREATE TABLE functions (
+      CREATE TABLE IF NOT EXISTS functions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -64,9 +62,9 @@ async function createSchema() {
       )
     `;
 
-    // Create executions table (depends on functions and users)
+    // 3. Executions table
     await connection.queryObject`
-      CREATE TABLE executions (
+      CREATE TABLE IF NOT EXISTS executions (
         id TEXT PRIMARY KEY,
         function_id TEXT NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -78,9 +76,9 @@ async function createSchema() {
       )
     `;
 
-    // Create quotas table (depends on users)
+    // 4. Quotas table
     await connection.queryObject`
-      CREATE TABLE quotas (
+      CREATE TABLE IF NOT EXISTS quotas (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         cpu_time_used_ms INTEGER DEFAULT 0,
@@ -90,7 +88,7 @@ async function createSchema() {
       )
     `;
 
-    // Create indexes
+    // 5. Indexes for performance
     await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_functions_user_id ON functions(user_id)`;
     await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_function_id ON executions(function_id)`;
     await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_user_id ON executions(user_id)`;
@@ -103,6 +101,10 @@ async function createSchema() {
     connection.release();
   }
 }
+
+/**
+ * DATABASE OPERATIONS
+ */
 
 export async function getUser(appwriteUserId) {
   const connection = await pool.connect();
@@ -187,20 +189,6 @@ export async function updateFunctionCode(functionId, userId, code) {
   }
 }
 
-export async function updateFunctionStatus(functionId, userId, enabled) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      UPDATE functions SET enabled = ${enabled}, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${functionId} AND user_id = ${userId}
-      RETURNING *
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
 export async function deleteFunction(functionId, userId) {
   const connection = await pool.connect();
   try {
@@ -259,20 +247,6 @@ export async function updateQuota(userId, cpuTimeUsedMs, concurrentCount) {
       SET cpu_time_used_ms = cpu_time_used_ms + ${cpuTimeUsedMs},
           concurrent_count = ${concurrentCount}
       WHERE user_id = ${userId}
-    `;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function resetDailyQuotas() {
-  const connection = await pool.connect();
-  try {
-    await connection.queryObject`
-      UPDATE quotas 
-      SET cpu_time_used_ms = 0,
-          last_reset_at = CURRENT_TIMESTAMP
-      WHERE last_reset_at < CURRENT_TIMESTAMP - INTERVAL '24 hours'
     `;
   } finally {
     connection.release();
