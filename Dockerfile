@@ -25,4 +25,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # 5. Run the application
 # We keep your specific permission requirements intact.
-CMD ["run", "--allow-net", "--allow-env", "--allow-run", "--allow-read", "main.js"]
+CMD ["run", "--allow-net", "--allow-env", "--allow-run", "--allow-read", "--unstable-worker-options", "main.js"]
