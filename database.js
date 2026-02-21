@@ -24,6 +24,9 @@ export async function initDatabase() {
 
     // Initialize schema
     await createSchema();
+    
+    // Create test function
+    await createTestFunction();
   } catch (error) {
     console.error("[Novirun] Database connection failed:", error.message);
     throw error;
@@ -174,6 +177,18 @@ export async function getFunctionById(functionId) {
   }
 }
 
+export async function getFunctionByName(name) {
+  const connection = await pool.connect();
+  try {
+    const result = await connection.queryObject`
+      SELECT * FROM functions WHERE name = ${name} LIMIT 1
+    `;
+    return result.rows[0];
+  } finally {
+    connection.release();
+  }
+}
+
 export async function listFunctions(userId) {
   const connection = await pool.connect();
   try {
@@ -283,5 +298,77 @@ export async function closeDatabase() {
   if (pool) {
     await pool.end();
     console.log("[Novirun] Database connection closed");
+  }
+}
+
+/**
+ * Creates a test function for demo/testing purposes
+ */
+async function createTestFunction() {
+  const connection = await pool.connect();
+  try {
+    // Check if test user exists
+    let testUser = await connection.queryObject`
+      SELECT * FROM users WHERE appwrite_user_id = 'system'
+    `;
+    
+    if (testUser.rows.length === 0) {
+      // Create system user
+      const userId = crypto.randomUUID();
+      await connection.queryObject`
+        INSERT INTO users (id, appwrite_user_id, email)
+        VALUES (${userId}, 'system', 'system@novirun.local')
+      `;
+      testUser = await connection.queryObject`
+        SELECT * FROM users WHERE appwrite_user_id = 'system'
+      `;
+    }
+    
+    const systemUser = testUser.rows[0];
+    
+    // Check if test function exists
+    const existingFunc = await connection.queryObject`
+      SELECT * FROM functions WHERE name = 'hello-world' AND user_id = ${systemUser.id}
+    `;
+    
+    if (existingFunc.rows.length === 0) {
+      // Create test function
+      const functionId = crypto.randomUUID();
+      const testCode = `const name = input?.name || "World";
+const time = new Date().toLocaleTimeString();
+
+return new Response(JSON.stringify({
+  message: \`Hello, \${name}!\`,
+  timestamp: new Date().toISOString(),
+  time: time,
+  server: "Novirun FaaS",
+  runtime: "Deno"
+}), {
+  status: 200,
+  headers: { "Content-Type": "application/json" }
+});`;
+      
+      await connection.queryObject`
+        INSERT INTO functions (id, user_id, name, code, enabled)
+        VALUES (${functionId}, ${systemUser.id}, 'hello-world', ${testCode}, true)
+      `;
+      
+      // Initialize quota for system user
+      const quotaId = crypto.randomUUID();
+      await connection.queryObject`
+        INSERT INTO quotas (id, user_id)
+        VALUES (${quotaId}, ${systemUser.id})
+        ON CONFLICT (user_id) DO NOTHING
+      `;
+      
+      console.log("[Novirun] Test function 'hello-world' created successfully");
+      console.log(`[Novirun] Test it at: /run/${functionId}`);
+    } else {
+      console.log("[Novirun] Test function 'hello-world' already exists");
+    }
+  } catch (error) {
+    console.error("[Novirun] Failed to create test function:", error.message);
+  } finally {
+    connection.release();
   }
 }
