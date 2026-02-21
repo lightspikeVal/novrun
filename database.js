@@ -66,6 +66,27 @@ async function createSchema() {
       )
     `;
 
+    // 2.1. Add language column if it doesn't exist (migration for existing databases)
+    try {
+      const checkColumn = await connection.queryObject`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'functions' 
+        AND column_name = 'language'
+      `;
+      
+      if (checkColumn.rows.length === 0) {
+        console.log("[Novirun] Migrating: Adding language column to functions table...");
+        await connection.queryObject`
+          ALTER TABLE functions 
+          ADD COLUMN language TEXT DEFAULT 'javascript'
+        `;
+        console.log("[Novirun] Migration complete: language column added");
+      }
+    } catch (migrationError) {
+      console.warn("[Novirun] Migration warning:", migrationError.message);
+    }
+
     // 3. Executions table
     await connection.queryObject`
       CREATE TABLE IF NOT EXISTS executions (
@@ -143,11 +164,36 @@ export async function createFunction(userId, name, code, language = 'javascript'
   const connection = await pool.connect();
   try {
     const functionId = crypto.randomUUID();
-    const result = await connection.queryObject`
-      INSERT INTO functions (id, user_id, name, code, language)
-      VALUES (${functionId}, ${userId}, ${name}, ${code}, ${language})
-      RETURNING *
+    
+    // Check if language column exists
+    const checkColumn = await connection.queryObject`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'functions' 
+      AND column_name = 'language'
     `;
+    
+    let result;
+    if (checkColumn.rows.length > 0) {
+      // Language column exists
+      result = await connection.queryObject`
+        INSERT INTO functions (id, user_id, name, code, language)
+        VALUES (${functionId}, ${userId}, ${name}, ${code}, ${language})
+        RETURNING *
+      `;
+    } else {
+      // Language column doesn't exist yet (fallback)
+      result = await connection.queryObject`
+        INSERT INTO functions (id, user_id, name, code)
+        VALUES (${functionId}, ${userId}, ${name}, ${code})
+        RETURNING *
+      `;
+      // Add language to result
+      if (result.rows[0]) {
+        result.rows[0].language = language;
+      }
+    }
+    
     return result.rows[0];
   } finally {
     connection.release();
@@ -160,7 +206,11 @@ export async function getFunction(functionId, userId) {
     const result = await connection.queryObject`
       SELECT * FROM functions WHERE id = ${functionId} AND user_id = ${userId}
     `;
-    return result.rows[0];
+    const func = result.rows[0];
+    if (func && !func.language) {
+      func.language = 'javascript';
+    }
+    return func;
   } finally {
     connection.release();
   }
@@ -172,7 +222,11 @@ export async function getFunctionById(functionId) {
     const result = await connection.queryObject`
       SELECT * FROM functions WHERE id = ${functionId}
     `;
-    return result.rows[0];
+    const func = result.rows[0];
+    if (func && !func.language) {
+      func.language = 'javascript';
+    }
+    return func;
   } finally {
     connection.release();
   }
@@ -184,7 +238,11 @@ export async function getFunctionByName(name) {
     const result = await connection.queryObject`
       SELECT * FROM functions WHERE name = ${name} LIMIT 1
     `;
-    return result.rows[0];
+    const func = result.rows[0];
+    if (func && !func.language) {
+      func.language = 'javascript';
+    }
+    return func;
   } finally {
     connection.release();
   }
@@ -193,11 +251,30 @@ export async function getFunctionByName(name) {
 export async function listFunctions(userId) {
   const connection = await pool.connect();
   try {
-    const result = await connection.queryObject`
-      SELECT id, name, language, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
-      ORDER BY created_at DESC
+    // Check if language column exists
+    const checkColumn = await connection.queryObject`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'functions' 
+      AND column_name = 'language'
     `;
-    return result.rows;
+    
+    if (checkColumn.rows.length > 0) {
+      // Language column exists
+      const result = await connection.queryObject`
+        SELECT id, name, language, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
+        ORDER BY created_at DESC
+      `;
+      return result.rows;
+    } else {
+      // Language column doesn't exist yet (fallback for migration)
+      const result = await connection.queryObject`
+        SELECT id, name, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
+        ORDER BY created_at DESC
+      `;
+      // Add default language to results
+      return result.rows.map(row => ({ ...row, language: 'javascript' }));
+    }
   } finally {
     connection.release();
   }
@@ -206,21 +283,36 @@ export async function listFunctions(userId) {
 export async function updateFunctionCode(functionId, userId, code, language = null) {
   const connection = await pool.connect();
   try {
+    // Check if language column exists
+    const checkColumn = await connection.queryObject`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'functions' 
+      AND column_name = 'language'
+    `;
+    
     let result;
-    if (language) {
+    if (checkColumn.rows.length > 0 && language) {
+      // Language column exists and language is provided
       result = await connection.queryObject`
         UPDATE functions SET code = ${code}, language = ${language}, updated_at = CURRENT_TIMESTAMP
         WHERE id = ${functionId} AND user_id = ${userId}
         RETURNING *
       `;
     } else {
+      // Either no language column or no language provided
       result = await connection.queryObject`
         UPDATE functions SET code = ${code}, updated_at = CURRENT_TIMESTAMP
         WHERE id = ${functionId} AND user_id = ${userId}
         RETURNING *
       `;
     }
-    return result.rows[0];
+    
+    const func = result.rows[0];
+    if (func && !func.language) {
+      func.language = 'javascript';
+    }
+    return func;
   } finally {
     connection.release();
   }
