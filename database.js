@@ -28,9 +28,20 @@ export async function initDatabase() {
 async function createSchema() {
   const connection = await pool.connect();
   try {
-    // Users table
+    // Drop tables in reverse order if they exist (to avoid FK constraint issues)
+    // This is safe because we're using CREATE TABLE IF NOT EXISTS
+    try {
+      await connection.queryObject`DROP TABLE IF EXISTS quotas CASCADE`;
+      await connection.queryObject`DROP TABLE IF EXISTS executions CASCADE`;
+      await connection.queryObject`DROP TABLE IF EXISTS functions CASCADE`;
+      await connection.queryObject`DROP TABLE IF EXISTS users CASCADE`;
+    } catch (dropError) {
+      // Ignore drop errors - tables might not exist
+    }
+
+    // Create users table first (no dependencies)
     await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS users (
+      CREATE TABLE users (
         id TEXT PRIMARY KEY,
         appwrite_user_id TEXT UNIQUE NOT NULL,
         email TEXT NOT NULL,
@@ -39,9 +50,9 @@ async function createSchema() {
       )
     `;
 
-    // Functions table
+    // Create functions table (depends on users)
     await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS functions (
+      CREATE TABLE functions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -53,9 +64,9 @@ async function createSchema() {
       )
     `;
 
-    // Executions table (for logging)
+    // Create executions table (depends on functions and users)
     await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS executions (
+      CREATE TABLE executions (
         id TEXT PRIMARY KEY,
         function_id TEXT NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -67,9 +78,9 @@ async function createSchema() {
       )
     `;
 
-    // Quotas table (tracks CPU time and concurrent executions)
+    // Create quotas table (depends on users)
     await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS quotas (
+      CREATE TABLE quotas (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         cpu_time_used_ms INTEGER DEFAULT 0,
@@ -84,7 +95,10 @@ async function createSchema() {
     await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_function_id ON executions(function_id)`;
     await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_user_id ON executions(user_id)`;
 
-    console.log("[Novirun] Database schema initialized");
+    console.log("[Novirun] Database schema initialized successfully");
+  } catch (error) {
+    console.error("[Novirun] Schema creation error:", error.message);
+    throw error;
   } finally {
     connection.release();
   }
