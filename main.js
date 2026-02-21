@@ -136,7 +136,7 @@ router.get("/test", async (ctx) => {
 
 // Deploy function
 router.post("/deploy", requireAuth, async (ctx) => {
-  const body = await ctx.request.body({ type: "json" }).value;
+  const body = await ctx.request.body().value;
   const { name, code } = body;
   const user = ctx.state.user;
 
@@ -200,7 +200,7 @@ router.get("/functions/:id", requireAuth, async (ctx) => {
 router.put("/functions/:id/code", requireAuth, async (ctx) => {
   const { id } = ctx.params;
   const user = ctx.state.user;
-  const { code } = await ctx.request.body({ type: "json" }).value;
+  const { code } = await ctx.request.body().value;
 
   const updated = await updateFunctionCode(id, user.id, code);
   ctx.response.body = formatSuccess(updated);
@@ -209,7 +209,7 @@ router.put("/functions/:id/code", requireAuth, async (ctx) => {
 // Toggle Status
 router.put("/functions/:id/status", requireAuth, async (ctx) => {
   const { id } = ctx.params;
-  const { enabled } = await ctx.request.body({ type: "json" }).value;
+  const { enabled } = await ctx.request.body().value;
   const updated = await updateFunctionStatus(id, ctx.state.user.id, enabled);
   ctx.response.body = formatSuccess(updated);
 });
