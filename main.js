@@ -5,7 +5,6 @@ import { Application, Router } from "https://deno.land/x/oak/mod.ts";
 import {
   initDatabase,
   closeDatabase,
-  getUser,
   createFunction,
   getFunction,
   getFunctionById,
@@ -15,12 +14,11 @@ import {
   deleteFunction,
   initializeQuota,
 } from "./database.js";
-import { requireAuth, getAuthUser } from "./auth.js";
+import { requireAuth } from "./auth.js";
 import { executeFunction, getInstanceCount, getMaxInstances } from "./executor.js";
 import {
   validateFunctionName,
   validateCode,
-  validateInputData,
   corsMiddleware,
   formatError,
   formatSuccess,
