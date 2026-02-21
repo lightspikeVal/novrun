@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database Service
+  postgres:
+    image: postgres:16-alpine
+    container_name: novirun-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-novirun}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-novirun_secure_password_change_me}
+      POSTGRES_DB: ${DB_NAME:-novirun}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # Persistent database storage
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Mount custom init scripts
+      # - ./init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - novirun-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-novirun}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    # Resource limits (adjust based on your laptop specs)
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # Novirun Control Plane Service
+  novirun:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: novirun-control-plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Server Configuration
+      PORT: 3001
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+      # Database Configuration
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-novirun}
+      DB_PASSWORD: ${DB_PASSWORD:-novirun_secure_password_change_me}
+      DB_NAME: ${DB_NAME:-novirun}
+      
+      # Appwrite Configuration
+      APPWRITE_ENDPOINT: ${APPWRITE_ENDPOINT:-http://host.docker.internal:80}
+      APPWRITE_API_KEY: ${APPWRITE_API_KEY:-your_appwrite_api_key}
+      APPWRITE_PROJECT_ID: ${APPWRITE_PROJECT_ID:-your_project_id}
+      
+      # Function Execution Configuration
+      MAX_EXECUTION_TIME: 15000
+      MAX_CPU_TIME_HOURS: 2
+      MAX_CONCURRENT_EXECUTIONS: 10
+      MAX_INSTANCES_PER_MACHINE: 50
+      
+      # Optional: Secret Management (placeholders for future integration)
+      VAULT_ENDPOINT: ${VAULT_ENDPOINT:-}
+      VAULT_TOKEN: ${VAULT_TOKEN:-}
+      
+      # Optional: Monitoring & Logging
+      ENABLE_REQUEST_LOGGING: ${ENABLE_REQUEST_LOGGING:-true}
+      ENABLE_EXECUTION_LOGGING: ${ENABLE_EXECUTION_LOGGING:-true}
+    ports:
+      - "${NOVIRUN_PORT:-3001}:3001"
+    volumes:
+      # Mount Deno cache (optional, for faster startup)
+      - deno_cache:/root/.cache/deno
+      # Mount function storage (optional)
+      - novirun_functions:/app/functions
+      # Mount logs (optional)
+      - novirun_logs:/app/logs
+    networks:
+      - novirun-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # Resource limits (adjust based on your laptop specs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    # Extra hosts for connecting to services on host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: novirun-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@novirun.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_PROXY_X_FOR_COUNT: 1
+      PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: 1
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - novirun-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    profiles:
+      - dev
+      - debug
+
+# Networks
+networks:
+  novirun-network:
+    driver: bridge
+
+# Named volumes for persistent data
+volumes:
+  postgres_data:
+    driver: local
+  deno_cache:
+    driver: local
+  novirun_functions:
+    driver: local
+  novirun_logs:
+    driver: local
+  pgadmin_data:
+    driver: local
