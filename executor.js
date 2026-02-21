@@ -1,405 +1,254 @@
-// database.js - PostgreSQL connection and schema management
-import { Pool } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
+// executor.js - Deno Worker-based execution with security and quota enforcement
+import { logExecution, updateQuota, getQuota } from "./database.js";
 
-let pool;
+const MAX_EXECUTION_TIME_MS = 15000; // 15 seconds hard limit
+const MAX_CPU_TIME_MS = 2 * 60 * 60 * 1000; // 2 hours
+const MAX_CONCURRENT_EXECUTIONS = 10; // per user
+const MAX_INSTANCES_PER_MACHINE = 50;
 
-/**
- * Initializes the database connection pool and sets up the schema.
- */
-export async function initDatabase() {
+let currentInstanceCount = 0;
+
+export async function executeFunction(functionId, userId, code, inputData = null, language = 'javascript') {
   try {
-    const connectionString = Deno.env.get("DATABASE_URL");
-    
-    if (!connectionString) {
-      throw new Error("DATABASE_URL environment variable is required");
+    // Check machine-level limit
+    if (currentInstanceCount >= MAX_INSTANCES_PER_MACHINE) {
+      return {
+        status: "error",
+        error: "Machine at capacity: maximum 50 concurrent instances reached",
+        executionTimeMs: 0,
+      };
     }
 
-    // Using 1 connection for the pool to conserve RAM on 4GB laptop
-    // Lazy-loading (true) ensures we don't hog memory until needed
-    pool = new Pool(connectionString, 1, true);
+    // Check user quotas
+    const quota = await getQuota(userId);
+    if (!quota) {
+      return {
+        status: "error",
+        error: "User quota not initialized",
+        executionTimeMs: 0,
+      };
+    }
 
-    const connection = await pool.connect();
-    console.log("[Novirun] Connected to PostgreSQL database");
-    connection.release();
+    if (quota.concurrent_count >= MAX_CONCURRENT_EXECUTIONS) {
+      return {
+        status: "error",
+        error: `User concurrent execution limit (${MAX_CONCURRENT_EXECUTIONS}) reached`,
+        executionTimeMs: 0,
+      };
+    }
 
-    // Initialize schema
-    await createSchema();
-    
-    // Create test function
-    await createTestFunction();
-  } catch (error) {
-    console.error("[Novirun] Database connection failed:", error.message);
-    throw error;
-  }
-}
+    if (quota.cpu_time_used_ms >= MAX_CPU_TIME_MS) {
+      return {
+        status: "error",
+        error: "User CPU time quota exceeded (2 hour limit)",
+        executionTimeMs: 0,
+      };
+    }
 
-/**
- * Creates tables and indexes if they do not exist.
- * Does NOT drop tables to ensure data persistence.
- */
-async function createSchema() {
-  const connection = await pool.connect();
-  try {
-    // 1. Users table
-    await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        appwrite_user_id TEXT UNIQUE NOT NULL,
-        email TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
+    currentInstanceCount++;
+    await updateQuota(userId, 0, quota.concurrent_count + 1);
 
-    // 2. Functions table
-    await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS functions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        code TEXT NOT NULL,
-        language TEXT DEFAULT 'javascript',
-        enabled BOOLEAN DEFAULT true,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, name)
-      )
-    `;
+    const startTime = Date.now();
 
-    // 2.1. Add language column if it doesn't exist (migration for existing databases)
     try {
-      const checkColumn = await connection.queryObject`
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE table_name = 'functions' 
-        AND column_name = 'language'
-      `;
+      // Inline worker code - Deno natively supports TypeScript!
+      const workerCode = `
+self.onmessage = async (e) => {
+  const { code, input, functionId, language } = e.data;
+  const startTime = performance.now();
+
+  try {
+    // Deno can run both JavaScript and TypeScript directly
+    const wrappedCode = \`
+      const input = \${JSON.stringify(input)};
       
-      if (checkColumn.rows.length === 0) {
-        console.log("[Novirun] Migrating: Adding language column to functions table...");
-        await connection.queryObject`
-          ALTER TABLE functions 
-          ADD COLUMN language TEXT DEFAULT 'javascript'
-        `;
-        console.log("[Novirun] Migration complete: language column added");
+      const handler = async (req) => {
+        \${code}
+      };
+      
+      const server = Deno.serve({ 
+        port: 0,
+        hostname: "127.0.0.1",
+        onListen: () => {}
+      }, handler);
+      
+      try {
+        const response = await fetch("http://127.0.0.1:" + server.addr.port);
+        const body = await response.text();
+        
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+        
+        const result = {
+          status: response.status,
+          headers: headers,
+          body: body
+        };
+        
+        await server.shutdown();
+        console.log(JSON.stringify(result));
+      } catch (err) {
+        await server.shutdown();
+        throw err;
       }
-    } catch (migrationError) {
-      console.warn("[Novirun] Migration warning:", migrationError.message);
-    }
+    \`;
 
-    // 3. Executions table
-    await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS executions (
-        id TEXT PRIMARY KEY,
-        function_id TEXT NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        status TEXT NOT NULL,
-        output TEXT,
-        error TEXT,
-        execution_time_ms INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
+    // Use appropriate MIME type based on language
+    const mimeType = language === 'typescript' ? 'application/typescript' : 'application/javascript';
+    const blob = new Blob([wrappedCode], { type: mimeType });
+    const url = URL.createObjectURL(blob);
 
-    // 4. Quotas table
-    await connection.queryObject`
-      CREATE TABLE IF NOT EXISTS quotas (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        cpu_time_used_ms INTEGER DEFAULT 0,
-        concurrent_count INTEGER DEFAULT 0,
-        last_reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id)
-      )
-    `;
-
-    // 5. Indexes for performance
-    await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_functions_user_id ON functions(user_id)`;
-    await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_function_id ON executions(function_id)`;
-    await connection.queryObject`CREATE INDEX IF NOT EXISTS idx_executions_user_id ON executions(user_id)`;
-
-    console.log("[Novirun] Database schema initialized successfully");
-  } catch (error) {
-    console.error("[Novirun] Schema creation error:", error.message);
-    throw error;
-  } finally {
-    connection.release();
-  }
-}
-
-/**
- * DATABASE OPERATIONS
- */
-
-export async function getUser(appwriteUserId) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM users WHERE appwrite_user_id = ${appwriteUserId}
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function createOrUpdateUser(appwriteUserId, email) {
-  const connection = await pool.connect();
-  try {
-    const userId = crypto.randomUUID();
-    const result = await connection.queryObject`
-      INSERT INTO users (id, appwrite_user_id, email)
-      VALUES (${userId}, ${appwriteUserId}, ${email})
-      ON CONFLICT (appwrite_user_id) DO UPDATE
-      SET email = ${email}, updated_at = CURRENT_TIMESTAMP
-      RETURNING *
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function createFunction(userId, name, code, language = 'javascript') {
-  const connection = await pool.connect();
-  try {
-    const functionId = crypto.randomUUID();
-    const result = await connection.queryObject`
-      INSERT INTO functions (id, user_id, name, code, language)
-      VALUES (${functionId}, ${userId}, ${name}, ${code}, ${language})
-      RETURNING *
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function getFunction(functionId, userId) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM functions WHERE id = ${functionId} AND user_id = ${userId}
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function getFunctionById(functionId) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM functions WHERE id = ${functionId}
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function getFunctionByName(name) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM functions WHERE name = ${name} LIMIT 1
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function listFunctions(userId) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT id, name, language, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
-      ORDER BY created_at DESC
-    `;
-    return result.rows;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function updateFunctionCode(functionId, userId, code, language = null) {
-  const connection = await pool.connect();
-  try {
-    let result;
-    if (language) {
-      result = await connection.queryObject`
-        UPDATE functions SET code = ${code}, language = ${language}, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${functionId} AND user_id = ${userId}
-        RETURNING *
-      `;
-    } else {
-      result = await connection.queryObject`
-        UPDATE functions SET code = ${code}, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${functionId} AND user_id = ${userId}
-        RETURNING *
-      `;
-    }
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function updateFunctionStatus(functionId, userId, enabled) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      UPDATE functions SET enabled = ${enabled}, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${functionId} AND user_id = ${userId}
-      RETURNING *
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function deleteFunction(functionId, userId) {
-  const connection = await pool.connect();
-  try {
-    await connection.queryObject`
-      DELETE FROM functions WHERE id = ${functionId} AND user_id = ${userId}
-    `;
-    return true;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function logExecution(functionId, userId, status, output, error, executionTimeMs) {
-  const connection = await pool.connect();
-  try {
-    const executionId = crypto.randomUUID();
-    await connection.queryObject`
-      INSERT INTO executions (id, function_id, user_id, status, output, error, execution_time_ms)
-      VALUES (${executionId}, ${functionId}, ${userId}, ${status}, ${output}, ${error}, ${executionTimeMs})
-    `;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function getQuota(userId) {
-  const connection = await pool.connect();
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM quotas WHERE user_id = ${userId}
-    `;
-    return result.rows[0];
-  } finally {
-    connection.release();
-  }
-}
-
-export async function initializeQuota(userId) {
-  const connection = await pool.connect();
-  try {
-    const quotaId = crypto.randomUUID();
-    await connection.queryObject`
-      INSERT INTO quotas (id, user_id) VALUES (${quotaId}, ${userId})
-      ON CONFLICT (user_id) DO NOTHING
-    `;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function updateQuota(userId, cpuTimeUsedMs, concurrentCount) {
-  const connection = await pool.connect();
-  try {
-    await connection.queryObject`
-      UPDATE quotas 
-      SET cpu_time_used_ms = cpu_time_used_ms + ${cpuTimeUsedMs},
-          concurrent_count = ${concurrentCount}
-      WHERE user_id = ${userId}
-    `;
-  } finally {
-    connection.release();
-  }
-}
-
-export async function closeDatabase() {
-  if (pool) {
-    await pool.end();
-    console.log("[Novirun] Database connection closed");
-  }
-}
-
-/**
- * Creates a test function for demo/testing purposes
- */
-async function createTestFunction() {
-  const connection = await pool.connect();
-  try {
-    // Check if test user exists
-    let testUser = await connection.queryObject`
-      SELECT * FROM users WHERE appwrite_user_id = 'system'
-    `;
-    
-    if (testUser.rows.length === 0) {
-      // Create system user
-      const userId = crypto.randomUUID();
-      await connection.queryObject`
-        INSERT INTO users (id, appwrite_user_id, email)
-        VALUES (${userId}, 'system', 'system@novirun.local')
-      `;
-      testUser = await connection.queryObject`
-        SELECT * FROM users WHERE appwrite_user_id = 'system'
-      `;
-    }
-    
-    const systemUser = testUser.rows[0];
-    
-    // Check if test function exists
-    const existingFunc = await connection.queryObject`
-      SELECT * FROM functions WHERE name = 'hello-world' AND user_id = ${systemUser.id}
-    `;
-    
-    if (existingFunc.rows.length === 0) {
-      // Create test function
-      const functionId = crypto.randomUUID();
-      const testCode = `const name = input?.name || "World";
-const time = new Date().toLocaleTimeString();
-
-return new Response(JSON.stringify({
-  message: \`Hello, \${name}!\`,
-  timestamp: new Date().toISOString(),
-  time: time,
-  server: "Novirun FaaS",
-  runtime: "Deno"
-}), {
-  status: 200,
-  headers: { "Content-Type": "application/json" }
-});`;
-      
-      await connection.queryObject`
-        INSERT INTO functions (id, user_id, name, code, language, enabled)
-        VALUES (${functionId}, ${systemUser.id}, 'hello-world', ${testCode}, 'javascript', true)
-      `;
-      
-      // Initialize quota for system user
-      const quotaId = crypto.randomUUID();
-      await connection.queryObject`
-        INSERT INTO quotas (id, user_id)
-        VALUES (${quotaId}, ${systemUser.id})
-        ON CONFLICT (user_id) DO NOTHING
-      `;
-      
-      console.log("[Novirun] Test function 'hello-world' created successfully");
-      console.log(`[Novirun] Test it at: /run/${functionId}`);
-    } else {
-      console.log("[Novirun] Test function 'hello-world' already exists");
+    try {
+      await import(url);
+      const executionTime = performance.now() - startTime;
+      self.postMessage({ status: "success", executionTimeMs: executionTime });
+    } finally {
+      URL.revokeObjectURL(url);
     }
   } catch (error) {
-    console.error("[Novirun] Failed to create test function:", error.message);
+    const executionTime = performance.now() - startTime;
+    self.postMessage({
+      status: "error",
+      error: error.message,
+      stack: error.stack,
+      executionTimeMs: executionTime
+    });
   } finally {
-    connection.release();
+    self.close();
   }
+};
+      `;
+      
+      // Create worker from inline code
+      const workerBlob = new Blob([workerCode], { type: "application/javascript" });
+      const workerUrl = URL.createObjectURL(workerBlob);
+      
+      const worker = new Worker(workerUrl, {
+        type: "module",
+        deno: {
+          permissions: {
+            net: true,      // Allow fetch/HTTP
+            read: false,    // No filesystem
+            write: false,   // No filesystem writes
+            env: false,     // No env vars
+            run: false,     // No subprocesses
+            ffi: false,     // No native code
+          },
+        },
+      });
+
+      // Set up timeout
+      const timeoutId = setTimeout(() => {
+        worker.terminate();
+      }, MAX_EXECUTION_TIME_MS);
+
+      // Execute and wait for result
+      const result = await new Promise((resolve) => {
+        let output = "";
+
+        // Capture console output from worker
+        worker.addEventListener("message", (e) => {
+          const data = e.data;
+          
+          if (data.status === "success") {
+            clearTimeout(timeoutId);
+            worker.terminate();
+            resolve({
+              status: "success",
+              output: output,
+              executionTimeMs: data.executionTimeMs,
+            });
+          } else if (data.status === "error") {
+            clearTimeout(timeoutId);
+            worker.terminate();
+            resolve({
+              status: "error",
+              error: data.error,
+              executionTimeMs: data.executionTimeMs,
+            });
+          }
+        });
+
+        worker.addEventListener("error", (e) => {
+          clearTimeout(timeoutId);
+          worker.terminate();
+          resolve({
+            status: "error",
+            error: e.message || "Worker error",
+            executionTimeMs: Date.now() - startTime,
+          });
+        });
+
+        // Send code to worker
+        worker.postMessage({
+          code: code,
+          input: inputData,
+          functionId: functionId,
+          language: language,
+        });
+
+        // Capture stdout (worker's console.log)
+        const originalLog = console.log;
+        console.log = (...args) => {
+          output += args.join(" ");
+          originalLog(...args);
+        };
+
+        // Restore after timeout
+        setTimeout(() => {
+          console.log = originalLog;
+        }, MAX_EXECUTION_TIME_MS + 100);
+      });
+
+      const executionTimeMs = Date.now() - startTime;
+
+      // Check if execution exceeded CPU time
+      if (quota.cpu_time_used_ms + executionTimeMs > MAX_CPU_TIME_MS) {
+        return {
+          status: "error",
+          error: "Execution would exceed CPU time quota",
+          executionTimeMs,
+        };
+      }
+
+      // Update quotas
+      await updateQuota(userId, executionTimeMs, quota.concurrent_count - 1);
+
+      // Log execution
+      await logExecution(
+        functionId,
+        userId,
+        result.status,
+        result.status === "success" ? result.output : null,
+        result.status === "error" ? result.error : null,
+        executionTimeMs
+      );
+
+      return {
+        status: result.status,
+        output: result.status === "success" ? result.output : null,
+        error: result.status === "error" ? result.error : null,
+        executionTimeMs,
+      };
+    } finally {
+      currentInstanceCount--;
+    }
+  } catch (error) {
+    console.error("[Novirun] Execution error:", error.message);
+    return {
+      status: "error",
+      error: error.message,
+      executionTimeMs: 0,
+    };
+  }
+}
+
+export function getInstanceCount() {
+  return currentInstanceCount;
+}
+
+export function getMaxInstances() {
+  return MAX_INSTANCES_PER_MACHINE;
 }
