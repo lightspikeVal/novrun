@@ -1,4 +1,4 @@
-// executor.js - Deno subprocess execution with security and quota enforcement
+// executor.js - Deno Worker-based execution with security and quota enforcement
 import { logExecution, updateQuota, getQuota } from "./database.js";
 
 const MAX_EXECUTION_TIME_MS = 15000; // 15 seconds hard limit
@@ -49,58 +49,90 @@ export async function executeFunction(functionId, userId, code, inputData = null
     await updateQuota(userId, 0, quota.concurrent_count + 1);
 
     const startTime = Date.now();
-    const tempFile = await Deno.makeTempFile({ suffix: ".js" });
-    
+
     try {
-      // Wrap user code with input parameter
-      const wrappedCode = `
-const input = ${JSON.stringify(inputData)};
-${code}
-      `;
-
-      await Deno.writeTextFile(tempFile, wrappedCode);
-
-      // Create promise for execution with timeout
-      const executionPromise = Deno.run({
-        cmd: [
-          "deno",
-          "run",
-          "--allow-net", // Only allow network (outbound)
-          "--no-allow-read", // Explicitly deny filesystem read
-          "--no-allow-write", // Explicitly deny filesystem write
-          "--no-allow-env", // Deny environment variable access
-          "--no-allow-run", // Deny subprocess spawning
-          tempFile,
-        ],
-        stdout: "piped",
-        stderr: "piped",
+      // Create worker with restricted permissions
+      const workerUrl = new URL("./worker.js", import.meta.url).href;
+      const worker = new Worker(workerUrl, {
+        type: "module",
+        deno: {
+          permissions: {
+            net: true,      // Allow fetch/HTTP
+            read: false,    // No filesystem
+            write: false,   // No filesystem
+            env: false,     // No env vars
+            run: false,     // No subprocesses
+            ffi: false,     // No native code
+          },
+        },
       });
 
       // Set up timeout
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(new Error("Execution timeout: exceeded 15 second limit"));
-        }, MAX_EXECUTION_TIME_MS);
-      });
+      const timeoutId = setTimeout(() => {
+        worker.terminate();
+      }, MAX_EXECUTION_TIME_MS);
 
-      // Race execution against timeout
-      const { success, stdout, stderr } = await Promise.race([
-        (async () => {
-          const [status, stdout, stderr] = await Promise.all([
-            executionPromise.status(),
-            executionPromise.output(),
-            executionPromise.stderrOutput(),
-          ]);
-          return { success: status.success, stdout, stderr };
-        })(),
-        timeoutPromise,
-      ]);
+      // Execute and wait for result
+      const result = await new Promise((resolve, reject) => {
+        let output = "";
+
+        // Capture console output from worker
+        worker.addEventListener("message", (e) => {
+          const data = e.data;
+          
+          if (data.status === "success") {
+            clearTimeout(timeoutId);
+            worker.terminate();
+            resolve({
+              status: "success",
+              output: output,
+              executionTimeMs: data.executionTimeMs,
+            });
+          } else if (data.status === "error") {
+            clearTimeout(timeoutId);
+            worker.terminate();
+            resolve({
+              status: "error",
+              error: data.error,
+              executionTimeMs: data.executionTimeMs,
+            });
+          }
+        });
+
+        worker.addEventListener("error", (e) => {
+          clearTimeout(timeoutId);
+          worker.terminate();
+          resolve({
+            status: "error",
+            error: e.message || "Worker error",
+            executionTimeMs: Date.now() - startTime,
+          });
+        });
+
+        // Send code to worker
+        worker.postMessage({
+          code: code,
+          input: inputData,
+          functionId: functionId,
+        });
+
+        // Capture stdout (worker's console.log)
+        const originalLog = console.log;
+        console.log = (...args) => {
+          output += args.join(" ");
+          originalLog(...args);
+        };
+
+        // Restore after timeout
+        setTimeout(() => {
+          console.log = originalLog;
+        }, MAX_EXECUTION_TIME_MS + 100);
+      });
 
       const executionTimeMs = Date.now() - startTime;
 
       // Check if execution exceeded CPU time
       if (quota.cpu_time_used_ms + executionTimeMs > MAX_CPU_TIME_MS) {
-        executionPromise.close();
         return {
           status: "error",
           error: "Execution would exceed CPU time quota",
@@ -108,37 +140,27 @@ ${code}
         };
       }
 
-      const output = new TextDecoder().decode(stdout);
-      const error = new TextDecoder().decode(stderr);
-
       // Update quotas
       await updateQuota(userId, executionTimeMs, quota.concurrent_count - 1);
-      
+
       // Log execution
       await logExecution(
         functionId,
         userId,
-        success ? "success" : "error",
-        success ? output : null,
-        !success || error ? error : null,
+        result.status,
+        result.status === "success" ? result.output : null,
+        result.status === "error" ? result.error : null,
         executionTimeMs
       );
 
-      executionPromise.close();
-
       return {
-        status: success ? "success" : "error",
-        output: success ? output : null,
-        error: !success || error ? error : null,
+        status: result.status,
+        output: result.status === "success" ? result.output : null,
+        error: result.status === "error" ? result.error : null,
         executionTimeMs,
       };
     } finally {
       currentInstanceCount--;
-      try {
-        await Deno.remove(tempFile);
-      } catch {
-        // Ignore cleanup errors
-      }
     }
   } catch (error) {
     console.error("[Novirun] Execution error:", error.message);
