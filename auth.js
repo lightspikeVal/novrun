@@ -7,6 +7,10 @@ const APPWRITE_PROJECT_ID = Deno.env.get("APPWRITE_PROJECT_ID");
 
 export async function verifyToken(sessionToken) {
   try {
+    console.log("[Novirun Auth] Verifying token with Appwrite...");
+    console.log("[Novirun Auth] Endpoint:", APPWRITE_ENDPOINT);
+    console.log("[Novirun Auth] Has API Key:", !!APPWRITE_API_KEY);
+    
     // Verify session with Appwrite
     const response = await fetch(`${APPWRITE_ENDPOINT}/account`, {
       method: "GET",
@@ -17,11 +21,16 @@ export async function verifyToken(sessionToken) {
       },
     });
 
+    console.log("[Novirun Auth] Appwrite response status:", response.status);
+
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error("[Novirun Auth] Appwrite error:", errorText);
       return null;
     }
 
     const user = await response.json();
+    console.log("[Novirun Auth] User verified:", user.$id);
     
     // Create or update user in our database
     const dbUser = await createOrUpdateUser(user.$id, user.email);
