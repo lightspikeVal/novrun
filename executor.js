@@ -51,15 +51,84 @@ export async function executeFunction(functionId, userId, code, inputData = null
     const startTime = Date.now();
 
     try {
-      // Create worker with restricted permissions
-      const workerUrl = new URL("./worker.js", import.meta.url).href;
+      // Inline worker code as data URL to avoid file system dependency
+      const workerCode = `
+self.onmessage = async (e) => {
+  const { code, input, functionId } = e.data;
+  const startTime = performance.now();
+
+  try {
+    const wrappedCode = \`
+      const input = \${JSON.stringify(input)};
+      
+      const handler = async (req) => {
+        \${code}
+      };
+      
+      const server = Deno.serve({ 
+        port: 0,
+        hostname: "127.0.0.1",
+        onListen: () => {}
+      }, handler);
+      
+      try {
+        const response = await fetch("http://127.0.0.1:" + server.addr.port);
+        const body = await response.text();
+        
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+        
+        const result = {
+          status: response.status,
+          headers: headers,
+          body: body
+        };
+        
+        await server.shutdown();
+        console.log(JSON.stringify(result));
+      } catch (err) {
+        await server.shutdown();
+        throw err;
+      }
+    \`;
+
+    const blob = new Blob([wrappedCode], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+
+    try {
+      await import(url);
+      const executionTime = performance.now() - startTime;
+      self.postMessage({ status: "success", executionTimeMs: executionTime });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch (error) {
+    const executionTime = performance.now() - startTime;
+    self.postMessage({
+      status: "error",
+      error: error.message,
+      stack: error.stack,
+      executionTimeMs: executionTime
+    });
+  } finally {
+    self.close();
+  }
+};
+      `;
+      
+      // Create worker from inline code
+      const workerBlob = new Blob([workerCode], { type: "application/javascript" });
+      const workerUrl = URL.createObjectURL(workerBlob);
+      
       const worker = new Worker(workerUrl, {
         type: "module",
         deno: {
           permissions: {
             net: true,      // Allow fetch/HTTP
             read: false,    // No filesystem
-            write: false,   // No filesystem
+            write: false,   // No filesystem writes
             env: false,     // No env vars
             run: false,     // No subprocesses
             ffi: false,     // No native code
