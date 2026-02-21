@@ -58,6 +58,7 @@ async function createSchema() {
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
         code TEXT NOT NULL,
+        language TEXT DEFAULT 'javascript',
         enabled BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -138,13 +139,13 @@ export async function createOrUpdateUser(appwriteUserId, email) {
   }
 }
 
-export async function createFunction(userId, name, code) {
+export async function createFunction(userId, name, code, language = 'javascript') {
   const connection = await pool.connect();
   try {
     const functionId = crypto.randomUUID();
     const result = await connection.queryObject`
-      INSERT INTO functions (id, user_id, name, code)
-      VALUES (${functionId}, ${userId}, ${name}, ${code})
+      INSERT INTO functions (id, user_id, name, code, language)
+      VALUES (${functionId}, ${userId}, ${name}, ${code}, ${language})
       RETURNING *
     `;
     return result.rows[0];
@@ -193,7 +194,7 @@ export async function listFunctions(userId) {
   const connection = await pool.connect();
   try {
     const result = await connection.queryObject`
-      SELECT id, name, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
+      SELECT id, name, language, enabled, created_at, updated_at FROM functions WHERE user_id = ${userId}
       ORDER BY created_at DESC
     `;
     return result.rows;
@@ -202,14 +203,23 @@ export async function listFunctions(userId) {
   }
 }
 
-export async function updateFunctionCode(functionId, userId, code) {
+export async function updateFunctionCode(functionId, userId, code, language = null) {
   const connection = await pool.connect();
   try {
-    const result = await connection.queryObject`
-      UPDATE functions SET code = ${code}, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${functionId} AND user_id = ${userId}
-      RETURNING *
-    `;
+    let result;
+    if (language) {
+      result = await connection.queryObject`
+        UPDATE functions SET code = ${code}, language = ${language}, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${functionId} AND user_id = ${userId}
+        RETURNING *
+      `;
+    } else {
+      result = await connection.queryObject`
+        UPDATE functions SET code = ${code}, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${functionId} AND user_id = ${userId}
+        RETURNING *
+      `;
+    }
     return result.rows[0];
   } finally {
     connection.release();
@@ -349,8 +359,8 @@ return new Response(JSON.stringify({
 });`;
       
       await connection.queryObject`
-        INSERT INTO functions (id, user_id, name, code, enabled)
-        VALUES (${functionId}, ${systemUser.id}, 'hello-world', ${testCode}, true)
+        INSERT INTO functions (id, user_id, name, code, language, enabled)
+        VALUES (${functionId}, ${systemUser.id}, 'hello-world', ${testCode}, 'javascript', true)
       `;
       
       // Initialize quota for system user
