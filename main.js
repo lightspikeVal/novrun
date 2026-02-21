@@ -8,12 +8,12 @@ import {
   getUser,
   createFunction,
   getFunction,
+  getFunctionById,
   listFunctions,
   updateFunctionCode,
   updateFunctionStatus,
   deleteFunction,
   initializeQuota,
-  pool,
 } from "./database.js";
 import { requireAuth, getAuthUser } from "./auth.js";
 import { executeFunction, getInstanceCount, getMaxInstances } from "./executor.js";
@@ -163,16 +163,7 @@ router.get("/run/:id", async (ctx) => {
   }
 
   // Get function without user restriction (public execution)
-  const connection = await pool.connect();
-  let func;
-  try {
-    const result = await connection.queryObject`
-      SELECT * FROM functions WHERE id = ${id}
-    `;
-    func = result.rows[0];
-  } finally {
-    connection.release();
-  }
+  const func = await getFunctionById(id);
 
   if (!func || !func.enabled) {
     ctx.response.status = 404;
