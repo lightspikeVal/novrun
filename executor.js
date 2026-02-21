@@ -8,7 +8,7 @@ const MAX_INSTANCES_PER_MACHINE = 50;
 
 let currentInstanceCount = 0;
 
-export async function executeFunction(functionId, userId, code, inputData = null) {
+export async function executeFunction(functionId, userId, code, inputData = null, language = 'javascript') {
   try {
     // Check machine-level limit
     if (currentInstanceCount >= MAX_INSTANCES_PER_MACHINE) {
@@ -51,13 +51,14 @@ export async function executeFunction(functionId, userId, code, inputData = null
     const startTime = Date.now();
 
     try {
-      // Inline worker code as data URL to avoid file system dependency
+      // Inline worker code - Deno natively supports TypeScript!
       const workerCode = `
 self.onmessage = async (e) => {
-  const { code, input, functionId } = e.data;
+  const { code, input, functionId, language } = e.data;
   const startTime = performance.now();
 
   try {
+    // Deno can run both JavaScript and TypeScript directly
     const wrappedCode = \`
       const input = \${JSON.stringify(input)};
       
@@ -94,7 +95,9 @@ self.onmessage = async (e) => {
       }
     \`;
 
-    const blob = new Blob([wrappedCode], { type: "application/javascript" });
+    // Use appropriate MIME type based on language
+    const mimeType = language === 'typescript' ? 'application/typescript' : 'application/javascript';
+    const blob = new Blob([wrappedCode], { type: mimeType });
     const url = URL.createObjectURL(blob);
 
     try {
@@ -142,7 +145,7 @@ self.onmessage = async (e) => {
       }, MAX_EXECUTION_TIME_MS);
 
       // Execute and wait for result
-      const result = await new Promise((resolve, reject) => {
+      const result = await new Promise((resolve) => {
         let output = "";
 
         // Capture console output from worker
@@ -183,6 +186,7 @@ self.onmessage = async (e) => {
           code: code,
           input: inputData,
           functionId: functionId,
+          language: language,
         });
 
         // Capture stdout (worker's console.log)
