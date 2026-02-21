@@ -72,12 +72,17 @@ export function validateUUID(id) {
 
 export function corsMiddleware() {
   return async (ctx, next) => {
-    ctx.response.headers.set("Access-Control-Allow-Origin", "*");
+    const origin = ctx.request.headers.get("origin") || "*";
+    
+    // Set CORS headers
+    ctx.response.headers.set("Access-Control-Allow-Origin", origin);
     ctx.response.headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     ctx.response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    ctx.response.headers.set("Access-Control-Allow-Credentials", "true");
     
+    // Handle preflight
     if (ctx.request.method === "OPTIONS") {
-      ctx.response.status = 200;
+      ctx.response.status = 204;
       return;
     }
     
