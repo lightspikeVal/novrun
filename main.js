@@ -13,6 +13,7 @@ import {
   updateFunctionStatus,
   deleteFunction,
   initializeQuota,
+  pool,
 } from "./database.js";
 import { requireAuth, getAuthUser } from "./auth.js";
 import { executeFunction, getInstanceCount, getMaxInstances } from "./executor.js";
@@ -151,26 +152,48 @@ router.delete("/functions/:id", requireAuth, async (ctx) => {
   ctx.response.status = 204;
 });
 
-// Execute Function (Requires User Auth)
-router.post("/functions/:id/run", async (ctx) => {
+// Execute Function (Public - No Auth Required)
+router.get("/run/:id", async (ctx) => {
   const { id } = ctx.params;
-  const { input } = await ctx.request.body({ type: "json" }).value;
 
-  const user = await getAuthUser(ctx.request);
-  if (!user) {
-    ctx.response.status = 401;
-    ctx.response.body = formatError("Authentication required");
+  if (!validateUUID(id)) {
+    ctx.response.status = 400;
+    ctx.response.body = formatError("Invalid function ID format");
     return;
   }
 
-  const func = await getFunction(id, user.id);
+  // Get function without user restriction (public execution)
+  const connection = await pool.connect();
+  let func;
+  try {
+    const result = await connection.queryObject`
+      SELECT * FROM functions WHERE id = ${id}
+    `;
+    func = result.rows[0];
+  } finally {
+    connection.release();
+  }
+
   if (!func || !func.enabled) {
-    ctx.response.status = 403;
-    ctx.response.body = formatError("Function unavailable or disabled");
+    ctx.response.status = 404;
+    ctx.response.body = formatError("Function not found or disabled");
     return;
   }
 
-  const result = await executeFunction(id, user.id, func.code, input);
+  // Parse input from query parameters
+  const input = ctx.request.url.searchParams.get("input");
+  let parsedInput = null;
+  if (input) {
+    try {
+      parsedInput = JSON.parse(input);
+    } catch {
+      ctx.response.status = 400;
+      ctx.response.body = formatError("Invalid JSON in input parameter");
+      return;
+    }
+  }
+
+  const result = await executeFunction(id, func.user_id, func.code, parsedInput);
   ctx.response.body = formatSuccess({
     ...result,
     output: sanitizeOutput(result.output)
