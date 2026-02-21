@@ -5,13 +5,13 @@ let pool;
 
 export async function initDatabase() {
   try {
-    pool = new Pool({
-      user: Deno.env.get("DB_USER") || "postgres",
-      password: Deno.env.get("DB_PASSWORD") || "postgres",
-      hostname: Deno.env.get("DB_HOST") || "localhost",
-      port: parseInt(Deno.env.get("DB_PORT") || "5432"),
-      database: Deno.env.get("DB_NAME") || "novirun",
-    }, 1);
+    const connectionString = Deno.env.get("DATABASE_URL");
+    
+    if (!connectionString) {
+      throw new Error("DATABASE_URL environment variable is required");
+    }
+
+    pool = new Pool(connectionString, 1);
 
     const connection = await pool.connect();
     console.log("[Novirun] Connected to PostgreSQL database");
